@@ -574,7 +574,7 @@ class ModelRunner:
         self,
         seq_group_metadata_list: Optional[List[SequenceGroupMetadata]],
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
-    ) -> Optional[SamplerOutput]:
+    ) -> Tuple[Optional[SamplerOutput], Optional[torch.Tensor]]:
         (input_tokens, input_positions, input_metadata, sampling_metadata,
          lora_requests,
          lora_mapping) = self.prepare_input_tensors(seq_group_metadata_list)
@@ -588,7 +588,7 @@ class ModelRunner:
             model_executable = self.graph_runners[graph_batch_size]
         else:
             model_executable = self.model
-        hidden_states = model_executable(
+        hidden_states, attention_scores = model_executable(
             input_ids=input_tokens,
             positions=input_positions,
             kv_caches=kv_caches,
@@ -600,7 +600,7 @@ class ModelRunner:
             hidden_states=hidden_states,
             sampling_metadata=sampling_metadata,
         )
-        return output
+        return output, attention_scores
 
     @torch.inference_mode()
     def profile_run(self) -> None:

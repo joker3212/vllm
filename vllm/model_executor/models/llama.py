@@ -151,6 +151,7 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: KVCache,
         input_metadata: InputMetadata,
+        output_attentions: bool = False
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -158,7 +159,10 @@ class LlamaAttention(nn.Module):
         k_cache, v_cache = kv_cache
         attn_output = self.attn(q, k, v, k_cache, v_cache, input_metadata)
         output, _ = self.o_proj(attn_output)
-        return output
+        if output_attentions:
+            output, attn_output
+        else:
+            return output, None
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -205,7 +209,8 @@ class LlamaDecoderLayer(nn.Module):
         kv_cache: KVCache,
         input_metadata: InputMetadata,
         residual: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        output_attentions: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -213,18 +218,19 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
+        hidden_states, attn_scores = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             input_metadata=input_metadata,
+            output_attentions=output_attentions
         )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
+        return hidden_states, residual, attn_scores
 
 
 class LlamaModel(nn.Module):
@@ -234,6 +240,7 @@ class LlamaModel(nn.Module):
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
+        output_attentions: bool = False
     ) -> None:
         super().__init__()
         self.config = config
@@ -252,6 +259,7 @@ class LlamaModel(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.output_attentions = output_attentions
 
     def forward(
         self,
@@ -259,20 +267,26 @@ class LlamaModel(nn.Module):
         positions: torch.Tensor,
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         hidden_states = self.embed_tokens(input_ids)
         residual = None
+        attention_scores = [] if self.output_attentions else None
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            hidden_states, residual = layer(
+            hidden_states, residual, attention_scores_i = layer(
                 positions,
                 hidden_states,
                 kv_caches[i],
                 input_metadata,
                 residual,
+                self.output_attentions,
             )
+            if self.output_attentions:
+                attention_scores.append(attention_scores_i)
         hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        if self.output_attentions:
+            attention_scores = torch.Tensor(attention_scores)
+        return hidden_states, attention_scores 
 
 
 class LlamaForCausalLM(nn.Module):
@@ -308,11 +322,12 @@ class LlamaForCausalLM(nn.Module):
         config: LlamaConfig,
         linear_method: Optional[LinearMethodBase] = None,
         lora_config: Optional[LoRAConfig] = None,
+        output_attentions: bool = False
     ) -> None:
         super().__init__()
         self.config = config
         self.linear_method = linear_method
-        self.model = LlamaModel(config, linear_method, lora_config=lora_config)
+        self.model = LlamaModel(config, linear_method, lora_config=lora_config, output_attentions=output_attentions)
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -334,9 +349,9 @@ class LlamaForCausalLM(nn.Module):
         kv_caches: List[KVCache],
         input_metadata: InputMetadata,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions, kv_caches,
+        hidden_states, attention_scores = self.model(input_ids, positions, kv_caches,
                                    input_metadata)
-        return hidden_states
+        return hidden_states, attention_scores
 
     def sample(
         self,

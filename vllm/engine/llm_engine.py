@@ -7,6 +7,7 @@ import importlib
 from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple,
                     Union)
 
+import torch
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
@@ -103,7 +104,8 @@ class LLMEngine:
             f"enforce_eager={model_config.enforce_eager}, "
             f"kv_cache_dtype={cache_config.cache_dtype}, "
             f"device_config={device_config.device}, "
-            f"seed={model_config.seed})")
+            f"seed={model_config.seed}), "
+            f"output_attentions={model_config.output_attentions}")
         # TODO(woosuk): Print more configs in debug mode.
 
         self.model_config = model_config
@@ -767,7 +769,7 @@ class LLMEngine:
                 self.scheduler.free_seq(seq)
 
     def _process_model_outputs(
-            self, output: SamplerOutput,
+            self, output: Tuple[SamplerOutput, Optional[torch.Tensor]],
             scheduler_outputs: SchedulerOutputs) -> List[RequestOutput]:
         now = time.time()
         # Update the scheduled sequence groups with the model outputs.
